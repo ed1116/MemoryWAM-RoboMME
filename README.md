@@ -1,4 +1,29 @@
-# FastWAM
+# MemoryWAM-RoboMME
+
+> [!IMPORTANT]
+> This public repository is an independent, paper-guided MemoryWAM
+> reimplementation for RoboMME. It is derived from FastWAM and is **not** the
+> official MemoryWAM training or inference code.
+
+The target is one balanced multi-task model across all 16 RoboMME tasks. The
+implementation will retain FastWAM's Wan2.2 world-action foundation while adding
+MemoryWAM's two full-frame anchors, four recent full frames, and eight learned
+gist tokens for each older frame.
+
+- FastWAM upstream: commit `7faa71108368fbb3b6885649f112af607427a2d4`
+- Clean RoboMME interface reference: commit `ecf086c3be7c2223167d9bb2f6ef1f0a6e24353b`
+- Raw data: `/data/ed1116/Datasets/robomme_data_h5` (read-only)
+- Generated data/checkpoints/runs: `/data/ed1116/robomme`
+- Target hardware: NVIDIA Quadro RTX 8000, FP16 with dynamic loss scaling; no FlashAttention
+
+RoboMME-specific changes are a front/wrist 224x448 mosaic, 8-D joint/gripper
+actions, a 16-action horizon, and the official RoboMME policy-server lifecycle.
+See [`docs/provenance.md`](docs/provenance.md) for the source classification and
+intentional departures from the paper.
+
+---
+
+# FastWAM upstream documentation
 
 Official codebase for **Fast-WAM: Do World Action Models Need Test-time Future Imagination?**
 

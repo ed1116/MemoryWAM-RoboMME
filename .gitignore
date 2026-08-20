@@ -11,7 +11,6 @@ evaluate_results/
 .deepspeed*
 
 volc/
-tests/
 
 # ai coding
 .codex/
@@ -244,3 +243,10 @@ manifest.json
 wandb/
 onelogger.err
 onelogger.log
+
+# RoboMME local artifacts
+/videos/
+*.h5
+*.safetensors
+*.ckpt
+*.secret
