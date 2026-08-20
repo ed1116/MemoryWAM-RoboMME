@@ -1,6 +1,7 @@
 import glob
 import hashlib
 import os
+import re
 from dataclasses import dataclass
 from typing import Dict, Optional, Union
 
@@ -17,10 +18,21 @@ class ModelConfig:
     local_model_path: Optional[str] = None
     skip_download: Optional[bool] = None
     state_dict: Optional[Dict[str, torch.Tensor]] = None
+    revision: Optional[str] = None
+    cache_dir: Optional[str] = None
+    use_huggingface_cache: bool = False
+    require_immutable_revision: bool = False
 
     def check_input(self):
         if self.path is None and self.model_id is None:
             raise ValueError("ModelConfig requires either `path` or (`model_id`, `origin_file_pattern`).")
+        if self.require_immutable_revision and not (
+            isinstance(self.revision, str)
+            and re.fullmatch(r"[0-9a-fA-F]{40}", self.revision)
+        ):
+            raise ValueError(
+                "Hugging Face loading requires an immutable 40-character commit revision."
+            )
 
     def parse_original_file_pattern(self):
         if self.origin_file_pattern in [None, "", "./"]:
@@ -100,6 +112,9 @@ class ModelConfig:
 
     def download_if_necessary(self):
         self.check_input()
+        if self.use_huggingface_cache:
+            self._resolve_huggingface_snapshot()
+            return
         self.reset_local_model_path()
         if self.require_downloading():
             self.download()
@@ -112,6 +127,45 @@ class ModelConfig:
                 self.path = matches
         if isinstance(self.path, list) and len(self.path) == 1:
             self.path = self.path[0]
+
+    def _resolve_huggingface_snapshot(self):
+        """Resolve pinned files through the normal Hugging Face cache."""
+        if self.path is not None:
+            raise ValueError("Pinned Hugging Face loading does not accept a local `path`.")
+        if not isinstance(self.model_id, str) or self.model_id.count("/") != 1:
+            raise ValueError(
+                "Pinned Hugging Face loading requires `model_id` in `namespace/name` form."
+            )
+
+        from huggingface_hub import snapshot_download
+
+        file_pattern = self.parse_original_file_pattern()
+        snapshot_path = snapshot_download(
+            repo_id=self.model_id,
+            revision=self.revision,
+            cache_dir=self.cache_dir,
+            allow_patterns=file_pattern,
+        )
+        if self.origin_file_pattern in [None, "", "./"]:
+            self.path = snapshot_path
+        elif isinstance(self.origin_file_pattern, str) and self.origin_file_pattern.endswith("/"):
+            self.path = os.path.join(snapshot_path, self.origin_file_pattern.rstrip("/"))
+        else:
+            patterns = (
+                self.origin_file_pattern
+                if isinstance(self.origin_file_pattern, list)
+                else [self.origin_file_pattern]
+            )
+            matches = []
+            for pattern in patterns:
+                matches.extend(glob.glob(os.path.join(snapshot_path, pattern)))
+            self.path = sorted(set(matches))
+            if not self.path:
+                raise FileNotFoundError(
+                    f"No files matched {patterns} in pinned Hugging Face snapshot {self.model_id}@{self.revision}."
+                )
+            if len(self.path) == 1:
+                self.path = self.path[0]
 
 
 def load_state_dict(file_path, torch_dtype=None, device="cpu"):

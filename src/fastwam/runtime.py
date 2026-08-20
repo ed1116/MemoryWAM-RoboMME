@@ -1,6 +1,7 @@
 import logging
 import os
 import inspect
+import re
 from pathlib import Path
 
 import torch
@@ -88,6 +89,7 @@ def create_fastwam(
     loss=None,
     mot_checkpoint_mixed_attn: bool = False,
     compile_training_denoise: bool = False,
+    vae_encode_mode: str = "compile",
     redirect_common_files: bool = True,
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
@@ -157,6 +159,7 @@ def create_fastwam(
         loss_lambda_video=float(loss.get("lambda_video", 1.0)),
         loss_lambda_action=float(loss.get("lambda_action", 1.0)),
         compile_training_denoise=bool(compile_training_denoise),
+        vae_encode_mode=str(vae_encode_mode),
     )
 
 
@@ -175,6 +178,7 @@ def create_fastwam_joint(
     loss=None,
     mot_checkpoint_mixed_attn: bool = False,
     redirect_common_files: bool = True,
+    vae_encode_mode: str = "compile",
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
 ):
@@ -242,6 +246,7 @@ def create_fastwam_joint(
         action_num_train_timesteps=int(action_scheduler["num_train_timesteps"]),
         loss_lambda_video=float(loss.get("lambda_video", 1.0)),
         loss_lambda_action=float(loss.get("lambda_action", 1.0)),
+        vae_encode_mode=str(vae_encode_mode),
     )
 
 
@@ -262,6 +267,11 @@ def create_fastwam_idm(
     mot_checkpoint_mixed_attn: bool = False,
     compile_training_denoise: bool = False,
     redirect_common_files: bool = True,
+    vae_encode_mode: str = "compile",
+    huggingface_only: bool = False,
+    model_revision: str | None = None,
+    tokenizer_revision: str | None = None,
+    hf_cache_dir: str | None = None,
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
 ):
@@ -333,7 +343,129 @@ def create_fastwam_idm(
         loss_lambda_video=float(loss.get("lambda_video", 1.0)),
         loss_lambda_action=float(loss.get("lambda_action", 1.0)),
         compile_training_denoise=bool(compile_training_denoise),
+        vae_encode_mode=str(vae_encode_mode),
+        huggingface_only=bool(huggingface_only),
+        model_revision=model_revision,
+        tokenizer_revision=tokenizer_revision,
+        hf_cache_dir=hf_cache_dir,
     )
+
+
+def create_robomme_fastwam_idm(
+    model_id: str,
+    model_revision: str,
+    tokenizer_model_id: str,
+    tokenizer_revision: str,
+    video_dit_config,
+    video_cond_noise_prob: float = 1.0,
+    tokenizer_max_len: int = 128,
+    load_text_encoder: bool = False,
+    action_dit_config=None,
+    action_dit_pretrained_path: str | None = None,
+    skip_dit_load_from_pretrain: bool = False,
+    video_scheduler=None,
+    action_scheduler=None,
+    loss=None,
+    mot_checkpoint_mixed_attn: bool = False,
+    compile_training_denoise: bool = False,
+    vae_encode_mode: str = "eager",
+    hf_cache_dir: str | None = None,
+    camera_order=("front", "wrist"),
+    mosaic_size=(224, 448),
+    state_dim: int = 8,
+    action_dim: int = 8,
+    action_horizon: int = 16,
+    action_representation: str = "absolute",
+    model_dtype: torch.dtype = torch.float16,
+    device: str = "cuda",
+):
+    """Construct the pinned-Hugging-Face FastWAM/IDM base for RoboMME."""
+
+    for label, revision in (
+        ("model_revision", model_revision),
+        ("tokenizer_revision", tokenizer_revision),
+    ):
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", str(revision)):
+            raise ValueError(f"`{label}` must be an immutable 40-character commit revision.")
+    if not isinstance(model_id, str) or model_id.count("/") != 1:
+        raise ValueError("`model_id` must be a Hugging Face ID in `namespace/name` form.")
+    if not isinstance(tokenizer_model_id, str) or tokenizer_model_id.count("/") != 1:
+        raise ValueError("`tokenizer_model_id` must be a Hugging Face ID in `namespace/name` form.")
+
+    expected = {
+        "camera_order": (("front", "wrist"), tuple(camera_order)),
+        "mosaic_size": ((224, 448), tuple(int(value) for value in mosaic_size)),
+        "state_dim": (8, int(state_dim)),
+        "action_dim": (8, int(action_dim)),
+        "action_horizon": (16, int(action_horizon)),
+        "action_representation": ("absolute", str(action_representation)),
+    }
+    mismatches = {
+        label: (wanted, actual)
+        for label, (wanted, actual) in expected.items()
+        if actual != wanted
+    }
+    if mismatches:
+        raise ValueError(f"Invalid fixed RoboMME model contract: {mismatches}")
+    if vae_encode_mode not in {"eager", "compile"}:
+        raise ValueError("`vae_encode_mode` must be 'eager' or 'compile'.")
+    if float(video_cond_noise_prob) != 1.0:
+        raise ValueError(
+            "RoboMME MemoryWAM requires `video_cond_noise_prob=1.0` per the paper."
+        )
+    if model_dtype is not torch.float16:
+        raise ValueError(
+            "RoboMME MemoryWAM requires FP16 (`torch.float16`); BF16 is unsupported on this GPU."
+        )
+
+    def _to_dict(value, label):
+        if isinstance(value, DictConfig):
+            value = OmegaConf.to_container(value, resolve=True)
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError(f"`{label}` must resolve to a dict, got {type(value)}")
+        return value
+
+    resolved_video = _to_dict(video_dit_config, "video_dit_config")
+    resolved_action = _to_dict(action_dit_config, "action_dit_config")
+    if int(resolved_video.get("action_dim", -1)) != 8:
+        raise ValueError("`video_dit_config.action_dim` must be 8 for RoboMME.")
+    if int(resolved_action.get("action_dim", -1)) != 8:
+        raise ValueError("`action_dit_config.action_dim` must be 8 for RoboMME.")
+
+    model = create_fastwam_idm(
+        model_id=model_id,
+        model_revision=model_revision,
+        tokenizer_model_id=tokenizer_model_id,
+        tokenizer_revision=tokenizer_revision,
+        video_dit_config=resolved_video,
+        video_cond_noise_prob=video_cond_noise_prob,
+        tokenizer_max_len=tokenizer_max_len,
+        load_text_encoder=load_text_encoder,
+        proprio_dim=8,
+        action_dit_config=resolved_action,
+        action_dit_pretrained_path=action_dit_pretrained_path,
+        skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
+        video_scheduler=video_scheduler,
+        action_scheduler=action_scheduler,
+        loss=loss,
+        mot_checkpoint_mixed_attn=mot_checkpoint_mixed_attn,
+        compile_training_denoise=compile_training_denoise,
+        redirect_common_files=False,
+        vae_encode_mode=vae_encode_mode,
+        huggingface_only=True,
+        hf_cache_dir=hf_cache_dir,
+        model_dtype=model_dtype,
+        device=device,
+    )
+    model.robomme_camera_order = ("front", "wrist")
+    model.robomme_mosaic_size = (224, 448)
+    model.robomme_state_dim = 8
+    model.robomme_action_dim = 8
+    model.robomme_action_horizon = 16
+    model.robomme_action_representation = "absolute"
+    return model
 
 
 def create_fastwam_optional_idm(
@@ -354,6 +486,7 @@ def create_fastwam_optional_idm(
     mot_checkpoint_mixed_attn: bool = False,
     compile_training_denoise: bool = False,
     redirect_common_files: bool = True,
+    vae_encode_mode: str = "compile",
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
 ):
@@ -424,6 +557,7 @@ def create_fastwam_optional_idm(
         loss_lambda_video=float(loss.get("lambda_video", 1.0)),
         loss_lambda_action=float(loss.get("lambda_action", 1.0)),
         compile_training_denoise=bool(compile_training_denoise),
+        vae_encode_mode=str(vae_encode_mode),
     )
 
 

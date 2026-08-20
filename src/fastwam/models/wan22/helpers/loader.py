@@ -122,7 +122,16 @@ def _load_registered_model(
     return model
 
 
-def _resolve_configs(model_id: str, tokenizer_model_id: str, redirect_common_files: bool = True):
+def _resolve_configs(
+    model_id: str,
+    tokenizer_model_id: str,
+    redirect_common_files: bool = True,
+    *,
+    huggingface_only: bool = False,
+    model_revision: str | None = None,
+    tokenizer_revision: str | None = None,
+    hf_cache_dir: str | None = None,
+):
     dit_config = ModelConfig(model_id=model_id, origin_file_pattern="diffusion_pytorch_model*.safetensors")
     text_config = ModelConfig(model_id=model_id, origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth")
     vae_config = ModelConfig(model_id=model_id, origin_file_pattern="Wan2.2_VAE.pth")
@@ -135,6 +144,22 @@ def _resolve_configs(model_id: str, tokenizer_model_id: str, redirect_common_fil
         }
         text_config.model_id, text_config.origin_file_pattern = redirect_dict[text_config.origin_file_pattern]
         vae_config.model_id, vae_config.origin_file_pattern = redirect_dict[vae_config.origin_file_pattern]
+
+    if huggingface_only:
+        if redirect_common_files:
+            raise ValueError(
+                "Pinned Hugging Face loading requires `redirect_common_files=False`; "
+                "all Wan components must resolve from the explicitly pinned model repository."
+            )
+        for config in (dit_config, text_config, vae_config):
+            config.revision = model_revision
+            config.cache_dir = hf_cache_dir
+            config.use_huggingface_cache = True
+            config.require_immutable_revision = True
+        tokenizer_config.revision = tokenizer_revision
+        tokenizer_config.cache_dir = hf_cache_dir
+        tokenizer_config.use_huggingface_cache = True
+        tokenizer_config.require_immutable_revision = True
     return dit_config, text_config, vae_config, tokenizer_config
 
 
@@ -148,6 +173,10 @@ def load_wan22_ti2v_5b_components(
     dit_config: dict[str, Any] | None = None,
     skip_dit_load_from_pretrain: bool = False,
     load_text_encoder: bool = True,
+    huggingface_only: bool = False,
+    model_revision: str | None = None,
+    tokenizer_revision: str | None = None,
+    hf_cache_dir: str | None = None,
 ):
     logger.info("Loading Wan2.2-TI2V-5B components...")
     start = time.time()
@@ -160,6 +189,10 @@ def load_wan22_ti2v_5b_components(
         model_id=model_id,
         tokenizer_model_id=tokenizer_model_id,
         redirect_common_files=redirect_common_files,
+        huggingface_only=huggingface_only,
+        model_revision=model_revision,
+        tokenizer_revision=tokenizer_revision,
+        hf_cache_dir=hf_cache_dir,
     )
 
     vae_config.download_if_necessary()

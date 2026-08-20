@@ -39,6 +39,7 @@ class FastWAM(torch.nn.Module):
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
         compile_training_denoise: bool = False,
+        vae_encode_mode: str = "compile",
     ):
         super().__init__()
         self.video_expert = video_expert
@@ -87,6 +88,11 @@ class FastWAM(torch.nn.Module):
         self.loss_lambda_action = float(loss_lambda_action)
         self.compile_training_denoise = bool(compile_training_denoise)
         self.mot.compile_training_layers = self.compile_training_denoise
+        if vae_encode_mode not in {"eager", "compile"}:
+            raise ValueError(
+                f"`vae_encode_mode` must be 'eager' or 'compile', got {vae_encode_mode!r}."
+            )
+        self.vae_encode_mode = vae_encode_mode
 
         self.to(self.device)
 
@@ -115,6 +121,11 @@ class FastWAM(torch.nn.Module):
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
         compile_training_denoise: bool = False,
+        vae_encode_mode: str = "compile",
+        huggingface_only: bool = False,
+        model_revision: str | None = None,
+        tokenizer_revision: str | None = None,
+        hf_cache_dir: str | None = None,
     ):
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required for FastWAM.from_wan22_pretrained().")
@@ -131,6 +142,10 @@ class FastWAM(torch.nn.Module):
             dit_config=video_dit_config,
             skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
             load_text_encoder=load_text_encoder,
+            huggingface_only=huggingface_only,
+            model_revision=model_revision,
+            tokenizer_revision=tokenizer_revision,
+            hf_cache_dir=hf_cache_dir,
         )
 
         video_expert = components.dit
@@ -173,6 +188,7 @@ class FastWAM(torch.nn.Module):
             loss_lambda_video=loss_lambda_video,
             loss_lambda_action=loss_lambda_action,
             compile_training_denoise=compile_training_denoise,
+            vae_encode_mode=vae_encode_mode,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -248,13 +264,17 @@ class FastWAM(torch.nn.Module):
     def _encode_video_latents(self, video_tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
         if tiled:
             raise NotImplementedError("Batched VAE encoding does not support tiled encoding.")
-        if not hasattr(self, "_vae_encode_compiled"):
-            self._vae_encode_compiled = torch.compile(
-                self.vae.model.encode,
-                backend="cudagraphs",
-                fullgraph=True,
-            )
-        return self._vae_encode_compiled(
+        if self.vae_encode_mode == "compile":
+            if not hasattr(self, "_vae_encode_compiled"):
+                self._vae_encode_compiled = torch.compile(
+                    self.vae.model.encode,
+                    backend="cudagraphs",
+                    fullgraph=True,
+                )
+            encode = self._vae_encode_compiled
+        else:
+            encode = self.vae.model.encode
+        return encode(
             video_tensor.to(self.device),
             self.vae.scale,
         ).clone()
