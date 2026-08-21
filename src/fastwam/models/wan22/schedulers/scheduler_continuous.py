@@ -1,10 +1,19 @@
+import math
+
 import torch
 
 
 class WanContinuousFlowMatchScheduler:
     """Continuous-time Flow-Matching scheduler with shift-based sampling."""
 
-    def __init__(self, num_train_timesteps: int = 1000, shift: float = 5.0, eps: float = 1e-10):
+    def __init__(
+        self,
+        num_train_timesteps: int = 1000,
+        shift: float = 5.0,
+        eps: float = 1e-10,
+        logit_normal_mu: float | None = None,
+        logit_normal_sigma: float | None = None,
+    ):
         if num_train_timesteps <= 0:
             raise ValueError(f"`num_train_timesteps` must be positive, got {num_train_timesteps}")
         if shift <= 0:
@@ -12,6 +21,27 @@ class WanContinuousFlowMatchScheduler:
         self.num_train_timesteps = int(num_train_timesteps)
         self.shift = float(shift)
         self.eps = float(eps)
+        if (logit_normal_mu is None) != (logit_normal_sigma is None):
+            raise ValueError(
+                "`logit_normal_mu` and `logit_normal_sigma` must be both set or both omitted."
+            )
+        if logit_normal_sigma is not None and (
+            not math.isfinite(float(logit_normal_sigma))
+            or float(logit_normal_sigma) <= 0
+        ):
+            raise ValueError(
+                f"`logit_normal_sigma` must be finite and positive, got {logit_normal_sigma}."
+            )
+        if logit_normal_mu is not None and not math.isfinite(float(logit_normal_mu)):
+            raise ValueError(
+                f"`logit_normal_mu` must be finite, got {logit_normal_mu}."
+            )
+        self.logit_normal_mu = (
+            None if logit_normal_mu is None else float(logit_normal_mu)
+        )
+        self.logit_normal_sigma = (
+            None if logit_normal_sigma is None else float(logit_normal_sigma)
+        )
         self._y_min, self._weight_norm_const = self._precompute_training_weight_stats()
 
     @staticmethod
@@ -28,10 +58,41 @@ class WanContinuousFlowMatchScheduler:
         norm_const = float(y_shifted_grid.mean().item())
         return y_min, norm_const
 
-    def sample_training_t(self, batch_size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    def use_shifted_logit_normal(self, mu: float = 0.0, sigma: float = 1.0) -> None:
+        """Select the paper's training-time base distribution.
+
+        The inherited FastWAM default remains uniform. The future MemoryWAM
+        training path must call this explicitly with ``mu=0`` and ``sigma=1``.
+        """
+
+        if not math.isfinite(float(mu)):
+            raise ValueError(f"`mu` must be finite, got {mu}.")
+        if not math.isfinite(float(sigma)) or float(sigma) <= 0:
+            raise ValueError(f"`sigma` must be finite and positive, got {sigma}.")
+        self.logit_normal_mu = float(mu)
+        self.logit_normal_sigma = float(sigma)
+
+    def sample_training_t(
+        self,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        *,
+        generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
         if batch_size <= 0:
             raise ValueError(f"`batch_size` must be positive, got {batch_size}")
-        u = torch.rand((batch_size,), device=device, dtype=torch.float32)
+        if self.logit_normal_mu is None:
+            u = torch.rand(
+                (batch_size,), device=device, dtype=torch.float32, generator=generator
+            )
+        else:
+            normal = torch.randn(
+                (batch_size,), device=device, dtype=torch.float32, generator=generator
+            )
+            u = torch.sigmoid(
+                normal * float(self.logit_normal_sigma) + float(self.logit_normal_mu)
+            )
         sigma = self._phi(u, self.shift)
         timestep = sigma * float(self.num_train_timesteps)
         return timestep.to(dtype=dtype)

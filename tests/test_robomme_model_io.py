@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,9 +11,6 @@ from omegaconf import OmegaConf
 
 from fastwam.models.wan22.fastwam import FastWAM
 from fastwam.models.wan22.helpers.io import ModelConfig
-from fastwam.models.wan22.schedulers.scheduler_continuous import (
-    WanContinuousFlowMatchScheduler,
-)
 from fastwam.robomme import (
     RoboMMEAbsoluteNormalizer,
     RoboMMEImagePreprocessor,
@@ -185,11 +181,7 @@ def test_robomme_model_config_pins_huggingface_and_fixed_dimensions():
     assert config.tokenizer_revision == "37ec512624d61f7aa208f7ea8140a131f93afc9a"
 
 
-def test_shifted_logit_normal_is_not_claimed_by_unsupported_scheduler_config():
-    parameters = inspect.signature(WanContinuousFlowMatchScheduler.__init__).parameters
-    assert "logit_normal_mu" not in parameters
-    assert "logit_normal_sigma" not in parameters
-
+def test_scheduler_selection_is_deferred_to_memorywam_training_integration():
     config_path = Path(__file__).parents[1] / "configs/model/memorywam_robomme.yaml"
     config = OmegaConf.load(config_path)
     assert "logit_normal_mu" not in config.video_scheduler

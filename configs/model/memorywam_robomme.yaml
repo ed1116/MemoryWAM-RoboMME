@@ -70,8 +70,8 @@ action_scheduler:
   infer_shift: 1.0
   num_train_timesteps: 1000
 
-# The inherited WanContinuousFlowMatchScheduler currently has no shifted
-# logit-normal timestep sampler, so mu=0/sigma=1 are not exposed as inert keys.
+# The scheduler core supports shifted-logit-normal sampling. Selection remains
+# deferred until the MemoryWAM training path is wired, so no inert keys live here.
 
 loss:
   lambda_video: 1.0

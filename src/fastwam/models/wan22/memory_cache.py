@@ -11,7 +11,7 @@ inferences for this reimplementation:
 * current action queries see the hybrid video cache and one another, while
   actions are never inserted into persistent memory;
 * gist and action tokens use the video expert's 3D coordinate basis, with the
-  one-past-grid marker described by :func:`gist_coordinates` and
+  disjoint one-past-grid markers described by :func:`gist_coordinates` and
   :func:`action_coordinates`.
 
 The cache holds one transformer's layer of K/V tensors.  Integration code is
@@ -424,13 +424,20 @@ def action_coordinates(
     *,
     device: torch.device | str | None = None,
 ) -> torch.Tensor:
-    """Current-frame action positions at sentinel row and sub-step columns."""
+    """Current-frame action positions at their own sentinel row and sub-steps.
+
+    Actions sit one row past the gist marker rather than sharing its row.  A
+    shared row would alias gist ``(f, H, W)`` onto action sub-step ``W`` for
+    every ``grid_width < NUM_ACTION_TOKENS``, which includes the RoboMME
+    7x14 grid.  Video rows ``0..H-1``, the gist row ``H``, and the action row
+    ``H+1`` stay disjoint for any grid.
+    """
 
     frame_id = _validate_frame_id(frame_id)
     _validate_grid(grid_height, grid_width)
     columns = torch.arange(NUM_ACTION_TOKENS, dtype=torch.long, device=device)
     frames = torch.full_like(columns, frame_id)
-    rows = torch.full_like(columns, grid_height)
+    rows = torch.full_like(columns, grid_height + 1)
     return torch.stack((frames, rows, columns), dim=-1)
 
 

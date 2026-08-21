@@ -27,10 +27,10 @@ copied or inferred to be official.
 | --- | --- | --- | --- |
 | Causal video VAE | `src/fastwam/models/wan22/wan_video_vae.py`: `WanVideoVAE38`, `VideoVAE38_`, `encode`; `src/fastwam/models/wan22/fastwam.py`: `FastWAM._encode_video_latents`, `_encode_input_image_latents_tensor` | Wan2.2 48-channel causal latents, spatial downsample 16, temporal downsample 4, and frozen VAE weights. | Feed clean observation latents into the persistent video cache. Full-prefix causal encoding is the correctness reference; a streaming shortcut is allowed only after equivalence is measured. |
 | Wan video DiT | `src/fastwam/models/wan22/wan_video_dit.py`: `WanVideoDiT`, `DiTBlock`, `precompute_freqs_cis_3d`, `get_freqs`, `prepare`, `post`, `build_video_to_video_mask` | Wan2.2 patch embedding, 3D RoPE, text cross-attention, timestep modulation, blocks, and video head. | Add per-frame gist tokens, absolute temporal coordinates, and the hybrid-memory visibility mask without replacing the pretrained expert. |
-| Paired MoT experts | `src/fastwam/models/wan22/mot.py`: `MoT`, `_forward_joint_layer`, `forward_joint_core`, `prefill_video_cache_tensor`, `forward_action_with_video_cache_tensor` | Separate video/action parameters with joint mixed self-attention and per-expert cross-attention/FFNs. | Make the layer boundary own persistent anchor/recent/gist K/V and expose an FSDP/checkpoint-safe paired video/action layer. |
+| Paired MoT experts | `src/fastwam/models/wan22/mot.py`: `MoT`, `_forward_joint_layer`, `forward_joint_core`, `prefill_video_cache_tensor`, `forward_action_with_video_cache_tensor` | Separate video/action parameters with joint mixed self-attention and per-expert cross-attention/FFNs. | `memory_mot.py` now provides paired ownership, checkpoint-safe per-frame cache insertion, and inherited dense/cache compatibility methods. It is a tested token-core boundary, not yet the VAE/training path. |
 | Action DiT | `src/fastwam/models/wan22/action_dit.py`: `ActionDiT`, `prepare`, `post`, `get_freqs`; `src/fastwam/models/wan22/fastwam.py`: `FastWAM.from_wan22_pretrained` | The 1B action expert, action encoder/head, flow timestep modulation, and the requirement that depth, heads, and head dimension match the video expert. | Replace its independent 1D sequence RoPE with coordinates in the video expert's 3D RoPE basis and reconstruct the paper's action-token visibility rather than selecting it implicitly. |
 | Model composition and losses | `src/fastwam/models/wan22/fastwam.py`: `FastWAM`, `build_inputs`, `_joint_denoise_core`, `training_loss`; `src/fastwam/models/wan22/fastwam_idm.py`: `FastWAMIDM`, `_teacher_forcing_training_denoise_core`, `training_loss` | Joint video/action flow-matching supervision, frozen VAE/text encoder, proprio token projection, and teacher-forced clean-video conditioning as the closest released starting point. | Train an episode-autoregressive clean/noisy/gist sequence whose mask matches deployment; do not use a clip-local full-conditioning cache as a substitute. |
-| Flow scheduler | `src/fastwam/models/wan22/schedulers/scheduler_continuous.py`: `WanContinuousFlowMatchScheduler` | Continuous interpolation, velocity target, scheduler weighting, and Euler inference interface. | Implement the paper's shifted-logit-normal timestep draw and preserve shifts 5.0 (video) and 1.0 (action). |
+| Flow scheduler | `src/fastwam/models/wan22/schedulers/scheduler_continuous.py`: `WanContinuousFlowMatchScheduler` | Continuous interpolation, velocity target, scheduler weighting, and Euler inference interface. | The scheduler now supports a seeded logit-normal base draw followed by the inherited branch shift, while uniform sampling remains the FastWAM default. Selecting it in the MemoryWAM training factory remains integration work. |
 | Training entry point | `scripts/train.py`: `main`; `src/fastwam/runtime.py`: `create_fastwam_idm`, `build_datasets`, `run_training`; `src/fastwam/trainer.py`: `Wan22Trainer`, `train` | Hydra construction, AdamW loop, gradient accumulation/clipping, validation hooks, and reproducible dataloader resume. | Add RoboMME episode batches and FP16 FSDP. Existing launchers under `scripts/train_zero{1,2}.sh` are Accelerate/DeepSpeed ZeRO launchers, not the paper's FSDP setup. |
 | Checkpointing | `src/fastwam/models/wan22/fastwam.py`: `save_checkpoint`, `load_checkpoint`; `src/fastwam/trainer.py`: `_save_weights_checkpoint`, `save_checkpoint`, `load_training_state` | Separate portable weights and resumable optimizer/scheduler/dataloader state are useful interfaces. | Save/load FSDP-safe full model state, including gist parameters and any non-parameter cache metadata needed to reproduce reset/prefill behavior. Runtime KV cache itself is episode state, not checkpoint state. |
 | Inference | `src/fastwam/models/wan22/fastwam.py`: `infer_action`, `_denoise_action_with_video_cache`; `src/fastwam/models/wan22/mot.py`: the two tensor cache methods above | Prefill video K/V once, then reuse it across every action denoising step; video generation can be bypassed. | Make prefill incremental and stateful across policy calls, retaining hybrid K/V per layer and clearing it only on `reset()`. |
@@ -64,7 +64,7 @@ protocol.
 | Video prediction during training; no video generation during policy inference | Paper | Keep dense video flow loss and use action-only closed-loop inference. |
 | Per-layer hybrid video K/V | Paper | Two full-frame initial anchors, four full-frame recent non-anchor frames, and eight persistent gist tokens for every frame; evict only an old frame's full K/V. |
 | Gist construction and visibility | Paper | Attach learnable gist queries to each clean frame. Each gist attends to that frame and permitted history; later video/action queries use the gist after the frame's full K/V is evicted. |
-| Train/deploy attention equivalence | Paper | Build the per-frame autoregressive clean/noisy-video/gist/action mask so training visibility reproduces the inference cache exactly. |
+| Train/deploy attention equivalence | Paper plus implementation inference | Clean and gist queries see retained history and one another. The noisy-video target sees retained history and its own block only: it is the same frame as the clean block, so a current clean/gist edge would expose what it must denoise, and a video rollout has no such block. The action target sees retained history plus current clean/gist and its own block, matching the deployed policy conditioning on the observation it just received. Neither target sees the other; historical actions are absent. CPU tests compare the stateful cache with an independently assembled retained-history reference through eviction. |
 | Joint 3D positional frame | Paper | Use absolute episode frame coordinates for video, gist, and action keys/queries. |
 | Flow training | Paper | 1000 timesteps, shifted-logit-normal draw, shifts 5.0/1.0, equal video/action loss weights, conditioning-frame Gaussian mixing with probability 1.0, AdamW `lr=2e-4`, weight decay `0.01`, betas `(0.9, 0.95)`, and grad clip 1.0. |
 | Distributed precision | Paper plus hardware adaptation | Paper used BF16 FSDP and per-block checkpointing. RoboMME uses FP16 with dynamic loss scaling because Quadro RTX 8000 lacks BF16 support; this is not a parity claim. |
@@ -86,9 +86,22 @@ official code:
    mixing.
 4. Use shifted-logit-normal base parameters `mu=0`, `sigma=1`, followed by the
    paper's branch shifts.
-5. Treat full-prefix causal-VAE encoding as the correctness oracle. Any local
+5. Reuse one learned bank of eight gist input embeddings at every episode
+   frame. Per-frame K/V are retained separately and carry their absolute frame
+   positions even though the input bank is shared.
+6. Use the explicit current-frame visibility reconstruction above: clean and
+   gist are mutually visible; the noisy-video target sees only retained history
+   and its own block; the action target additionally sees current clean/gist.
+   There is no noisy/action cross-edge and no persistent action K/V. Released
+   FastWAM is the reference for the noisy edge: `fastwam_idm.training_loss`
+   builds `latents_cond` and `latents_noisy` from one `input_latents` tensor,
+   and `_build_teacher_forcing_attention_mask` leaves the noisy-to-cond block
+   False while allowing action-to-cond.
+7. Treat full-prefix causal-VAE encoding as the correctness oracle. Any local
    or cached encoding must match it before use.
-6. Backpropagate through the full training episode. If measured OOM makes that
+8. Backpropagate through the full training episode. Cache tensors retain their
+   autograd history, and cache mutation occurs outside the activation-
+   checkpointed paired-layer call. If measured OOM makes that
    impossible, truncation or cache detachment is a new architectural decision
    and must be approved rather than enabled silently.
 
@@ -96,19 +109,25 @@ For RoboMME, the first two task-visible observations are the anchors, including
 demonstration history when present. No unavailable oracle event boundary is
 introduced.
 
+## Core choices resolved by implementation tests
+
+The shared gist bank and the exact current-frame mask are now fixed by the
+approved inferences above. Video, gist, and action tokens occupy disjoint rows
+of the shared 3-D basis: rows `0..H-1`, row `H`, and row `H+1`. A shared
+gist/action row would alias the gist marker `(f, H, W)` onto action sub-step
+`W` for every `grid_width < 16`, which includes the RoboMME 7x14 grid. CPU
+tests cover the Boolean matrix directly, assert the noisy target has no
+gradient path to its own clean frame, check coordinate disjointness, compare
+the stateful hybrid cache with a separate retained-history assembler across the
+first eviction, verify reset against a fresh core, match the inherited FastWAM
+dense MoT path, and backpropagate through checkpointed cross-frame K/V. These
+tests establish the token-core semantics in float32; they do not claim FP16,
+VAE, full-model, or distributed equivalence.
+
 ## Semantics still unresolved by released evidence
 
 Do not choose these silently during implementation:
 
-- The paper gives relationships and a figure, but not the complete Boolean
-  matrix for every clean-video, noisy-video, gist, and current-action
-  query/key pair. In particular, same-frame noisy-video-to-gist visibility and
-  gist visibility to current action tokens must be fixed by a documented mask
-  reconstruction and unit tests before model training.
-- The paper does not state whether the eight learnable gist embeddings are one
-  shared parameter bank reused at every frame or independently parameterized
-  by frame. An unbounded per-frame parameter table would conflict with
-  arbitrary episode lengths, but the final choice still needs to be recorded.
 - Full-prefix VAE is selected as the oracle, not as the required fast path.
   Incremental VAE feature-cache semantics and the batching of the four raw
   sub-step mosaics remain an empirical equivalence question.

@@ -169,7 +169,7 @@ def test_video_gist_and_action_coordinates_share_absolute_3d_basis():
     )
     torch.testing.assert_close(gist, torch.tensor([[12, 2, 3]]).expand(8, -1))
     torch.testing.assert_close(action[:, 0], torch.full((16,), 12))
-    torch.testing.assert_close(action[:, 1], torch.full((16,), 2))
+    torch.testing.assert_close(action[:, 1], torch.full((16,), 3))
     torch.testing.assert_close(action[:, 2], torch.arange(16))
 
     layout = MemoryWAMTrainingLayout((12,), video_tokens_per_frame=6)
@@ -190,3 +190,33 @@ def test_long_history_grows_only_by_gists_beyond_bounded_full_cache():
     assert snapshot.token_count == 6 + 1_600 * 8
     assert snapshot.key is not None
     assert snapshot.key.shape == (1, snapshot.token_count, 2)
+
+
+@pytest.mark.parametrize(
+    ("grid_height", "grid_width"),
+    [(7, 14), (2, 3), (4, 20), (1, 1)],
+)
+def test_video_gist_and_action_coordinates_never_collide(grid_height, grid_width):
+    """A shared sentinel row would alias gist onto action sub-step `grid_width`.
+
+    RoboMME's 224x448 mosaic gives a 7x14 grid, so every grid narrower than the
+    16 action tokens is affected, not just contrived cases.
+    """
+
+    frame_id = 5
+    video = {
+        tuple(row)
+        for row in video_coordinates(frame_id, grid_height, grid_width).tolist()
+    }
+    gist = {
+        tuple(row)
+        for row in gist_coordinates(frame_id, grid_height, grid_width).tolist()
+    }
+    action = {
+        tuple(row)
+        for row in action_coordinates(frame_id, grid_height, grid_width).tolist()
+    }
+
+    assert not video & gist
+    assert not video & action
+    assert not gist & action

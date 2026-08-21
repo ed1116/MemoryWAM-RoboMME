@@ -23,8 +23,12 @@ FastWAM supplies the released Wan2.2 world-action implementation.
 | Joint video/action flow matching | Inherited and paper-aligned | FastWAM and MemoryWAM paper |
 | Two full-frame anchors | Paper-specified | MemoryWAM paper |
 | Four recent full frames | Paper-specified | MemoryWAM paper |
-| Eight learned gist tokens per older frame | Paper-specified | MemoryWAM paper |
-| Exact integration points and cache containers | Implementation inference | Must be verified against uncached reference tests |
+| Eight retained gist K/V tokens per frame | Paper-specified | MemoryWAM paper |
+| One shared eight-token learned gist input bank | Implementation inference | Fixed for unbounded episode length; verified for reuse and gradients |
+| Exact clean/gist/noisy/action visibility matrix | Implementation inference constrained by paper and released FastWAM | Direct mask tests, a noisy-target gradient-path test, and cached/reference-equivalence tests |
+| Disjoint video/gist/action rows in the shared 3-D basis | Implementation inference | Coordinate-collision test across grids narrower and wider than the action horizon |
+| Paired-layer cache/checkpoint boundary | Implementation inference | CPU dense FastWAM equivalence and checkpointed cross-frame-gradient tests |
+| Shifted-logit-normal base draw (`mu=0`, `sigma=1`) before branch shift | Implementation inference constrained by paper | Seeded scheduler reference test; training selection not wired yet |
 | Two-camera 224x448 mosaic and 8-D action horizon 16 | RoboMME adaptation | Project plan |
 | FP16 with dynamic loss scaling | Hardware adaptation | Project plan; paper used BF16 |
 
