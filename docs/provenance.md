@@ -49,3 +49,11 @@ outside Git at `/data/ed1116/robomme/envs/memorywam`, which also provides
 Use `tests` explicitly. A bare `pytest` at the root also collects the vendored
 RoboTwin tests under `third_party`, whose collection fails only because the
 optional `openai` and `sapien` packages are absent.
+
+## Evaluation rollout budget
+
+Simulator evaluation uses **10 rollouts per task** (160 per method), not the
+official 50. This is an evaluation-time budget only: it must never influence
+training data, hyperparameters, checkpoint selection, or VQA corpus
+construction, all of which use the full 100 demonstrations per task with the
+canonical 90/10 episode split.
