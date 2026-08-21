@@ -67,7 +67,7 @@ protocol.
 | Train/deploy attention equivalence | Paper plus implementation inference | Clean and gist queries see retained history and one another. The noisy-video target sees retained history and its own block only: it is the same frame as the clean block, so a current clean/gist edge would expose what it must denoise, and a video rollout has no such block. The action target sees retained history plus current clean/gist and its own block, matching the deployed policy conditioning on the observation it just received. Neither target sees the other; historical actions are absent. CPU tests compare the stateful cache with an independently assembled retained-history reference through eviction. |
 | Joint 3D positional frame | Paper | Use absolute episode frame coordinates for video, gist, and action keys/queries. |
 | Flow training | Paper | 1000 timesteps, shifted-logit-normal draw, shifts 5.0/1.0, equal video/action loss weights, conditioning-frame Gaussian mixing with probability 1.0, AdamW `lr=2e-4`, weight decay `0.01`, betas `(0.9, 0.95)`, and grad clip 1.0. |
-| Distributed precision | Paper plus hardware adaptation | Paper used BF16 FSDP and per-block checkpointing. RoboMME uses FP16 with dynamic loss scaling because Quadro RTX 8000 lacks BF16 support; this is not a parity claim. |
+| Distributed precision | Paper plus hardware adaptation, now measured | Paper used BF16 FSDP and per-block checkpointing. RoboMME uses FP16 with dynamic loss scaling. Measured on the Quadro RTX 8000 (sm_75): BF16 is not native (`torch.cuda.is_bf16_supported(including_emulation=False)` is False) and emulated BF16 runs 4.8x slower than FP16, FlashAttention refuses sm_75 so attention falls back to the memory-efficient and math SDPA kernels, and FP16 parameters cannot be combined with `GradScaler`, so "FP16" means autocast over FP32 master weights. This is not a parity claim. |
 | RoboMME observation/action contract | RoboMME | Horizontal front+wrist `224x448` mosaic, producing a `14x28` VAE grid and `7x14=98` DiT tokens per latent frame; 8-D absolute action/state and horizon 16. |
 | Closed-loop update | Paper and RoboMME | After a 16-action chunk, ingest sub-step observations `{3, 7, 11, 15}` and update memory without generating video. |
 
@@ -124,10 +124,35 @@ dense MoT path, and backpropagate through checkpointed cross-frame K/V. These
 tests establish the token-core semantics in float32; they do not claim FP16,
 VAE, full-model, or distributed equivalence.
 
+## Measured FP16 fit gate
+
+`scripts/gate_fp16_memorywam.py` measures the paired-layer boundary at the real
+RoboMME token geometry (7x14 video grid, 8 gist, 16 action tokens) and writes a
+JSON report. Two-layer measurement, batch 1, 8 frames, activation checkpointing
+on, forward and one loss-scaled optimizer step:
+
+| Quantity | Measured (2 layers) | Projected (30 layers) |
+| --- | --- | --- |
+| Parameters | 395 M | 5.92 B |
+| Peak allocated during a training step | 9.3 GB | 139.5 GB |
+
+The projection is linear in depth and therefore approximate; it also assumes an
+8-frame episode, while RoboMME episodes run to 1,259 timesteps and the hybrid
+cache grows with retained frames. Even so, 139.5 GB against 47.5 GB of usable
+device memory shows that full-depth single-GPU training is not possible and
+that sharding across at least three devices is required, not optional. The
+plan's "test FSDP only when measured need justifies it" condition is met.
+
+Losses, gradient norms, and every gradient were finite, and the dynamic loss
+scale held at 65536 through the step.
+
 ## Semantics still unresolved by released evidence
 
 Do not choose these silently during implementation:
 
+- The FP16 fit gate measures a two-layer core, not the pretrained 30-layer
+  model. Real depth, longer episodes, optimizer-state sharding, and FSDP
+  communication cost still need direct measurement before a training run.
 - Full-prefix VAE is selected as the oracle, not as the required fast path.
   Incremental VAE feature-cache semantics and the batching of the four raw
   sub-step mosaics remain an empirical equivalence question.

@@ -380,3 +380,33 @@ def test_noisy_video_target_has_no_gradient_path_to_its_own_clean_frame():
         action_outputs[0].sum(), first_clean, allow_unused=True
     )
     assert action_to_clean is not None and bool((action_to_clean != 0).any())
+
+
+def test_dtype_cast_moves_rope_tables_without_discarding_their_imaginary_part():
+    """`.to(float16)` must not silently turn the complex rotary tables real.
+
+    The tables are buffers so a device move carries them along, but torch casts
+    complex buffers to real on a dtype change and only warns, which would
+    destroy positional encoding without failing anything.
+    """
+    core = _make_core(seed=13)
+    original = [table.clone() for table in core.rope_cache]
+    assert all(table.is_complex() for table in original)
+
+    core = core.to(dtype=torch.float16)
+
+    assert next(core.parameters()).dtype == torch.float16
+    for table, before in zip(core.rope_cache, original):
+        assert table.is_complex()
+        assert torch.equal(table, before)
+
+
+def test_rope_tables_still_follow_an_ordinary_device_or_dtype_transform():
+    core = _make_core(seed=14)
+    before = [table.clone() for table in core.rope_cache]
+
+    # A complex-to-complex cast is legitimate and must not be reverted.
+    core = core.to(dtype=torch.complex64)
+    assert all(table.dtype == torch.complex64 for table in core.rope_cache)
+    for table, original in zip(core.rope_cache, before):
+        torch.testing.assert_close(table, original.to(torch.complex64))

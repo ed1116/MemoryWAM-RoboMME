@@ -30,7 +30,9 @@ FastWAM supplies the released Wan2.2 world-action implementation.
 | Paired-layer cache/checkpoint boundary | Implementation inference | CPU dense FastWAM equivalence and checkpointed cross-frame-gradient tests |
 | Shifted-logit-normal base draw (`mu=0`, `sigma=1`) before branch shift | Implementation inference constrained by paper | Seeded scheduler reference test; training selection not wired yet |
 | Two-camera 224x448 mosaic and 8-D action horizon 16 | RoboMME adaptation | Project plan |
-| FP16 with dynamic loss scaling | Hardware adaptation | Project plan; paper used BF16 |
+| FP16 with dynamic loss scaling | Hardware adaptation, measured | Project plan; paper used BF16. RTX 8000 BF16 is emulated and 4.8x slower than FP16; FlashAttention refuses sm_75 |
+| Autocast over FP32 master weights rather than FP16 parameters | Implementation requirement | `GradScaler` raises on FP16 gradients, so half-precision parameters are not a valid configuration |
+| Complex RoPE buffers preserved across dtype casts | Defect fix | `.to(float16)` silently dropped the imaginary part; guarded and regression-tested |
 
 The raw HDF5 dataset is read from
 `/data/ed1116/Datasets/robomme_data_h5`. Processed artifacts, checkpoints, and

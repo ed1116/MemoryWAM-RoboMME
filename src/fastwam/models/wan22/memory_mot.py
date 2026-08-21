@@ -15,6 +15,7 @@ does implement the stateful attention semantics used by that future path.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import warnings
 import weakref
 from collections.abc import Sequence
 
@@ -35,6 +36,9 @@ from .memory_cache import (
     video_coordinates,
 )
 from .wan_video_dit import flash_attention, modulate, rope_apply
+
+
+_ROPE_AXES = ("frame", "row", "column")
 
 
 def rope_frequencies_from_coordinates(
@@ -660,7 +664,7 @@ class MemoryWAMSequentialCore(nn.Module):
         self.num_layers = len(self.layers)
         self.num_heads = self.layers[0].num_heads
         self.attn_head_dim = self.layers[0].attention_dim // self.num_heads
-        for name, table in zip(("frame", "row", "column"), video_rope_cache):
+        for name, table in zip(_ROPE_AXES, video_rope_cache):
             self.register_buffer(f"rope_{name}", table, persistent=False)
         self._layer_caches = [MemoryWAMLayerKVCache() for _ in self.layers]
         self._last_frame_id: int | None = None
@@ -697,6 +701,27 @@ class MemoryWAMSequentialCore(nn.Module):
         object.__setattr__(video_expert, "blocks", _ExpertBlockView(core, "video"))
         object.__setattr__(action_expert, "blocks", _ExpertBlockView(core, "action"))
         return core
+
+    def _apply(self, *args, **kwargs):
+        """Move the rotary tables with the module but never cast their dtype.
+
+        Wan's 3-D RoPE tables are complex. They are buffers so that ``.to(device)``
+        moves them, but ``.to(torch.float16)`` would cast complex to real and
+        silently discard the imaginary part, destroying positional encoding
+        without raising. Restore any table a transform made real.
+        """
+        saved = {name: getattr(self, f"rope_{name}") for name in _ROPE_AXES}
+        with warnings.catch_warnings():
+            # Torch warns while casting the tables; the restore below undoes it.
+            warnings.filterwarnings("ignore", message=".*[Cc]omplex.*")
+            module = super()._apply(*args, **kwargs)
+        for name, original in saved.items():
+            current = getattr(module, f"rope_{name}")
+            if not current.is_complex():
+                module.register_buffer(
+                    f"rope_{name}", original.to(device=current.device), persistent=False
+                )
+        return module
 
     @property
     def rope_cache(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
