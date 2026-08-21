@@ -35,3 +35,17 @@ FastWAM supplies the released Wan2.2 world-action implementation.
 The raw HDF5 dataset is read from
 `/data/ed1116/Datasets/robomme_data_h5`. Processed artifacts, checkpoints, and
 runs live under `/data/ed1116/robomme` and are never committed.
+
+## Environments
+
+The repository has no in-tree virtual environment. The interpreter lives
+outside Git at `/data/ed1116/robomme/envs/memorywam`, which also provides
+`ruff`. Run the repository-owned suite from the repository root:
+
+```bash
+/data/ed1116/robomme/envs/memorywam/bin/python -m pytest -q tests
+```
+
+Use `tests` explicitly. A bare `pytest` at the root also collects the vendored
+RoboTwin tests under `third_party`, whose collection fails only because the
+optional `openai` and `sapien` packages are absent.
