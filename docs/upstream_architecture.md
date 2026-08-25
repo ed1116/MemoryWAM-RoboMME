@@ -128,20 +128,33 @@ VAE, full-model, or distributed equivalence.
 
 `scripts/gate_fp16_memorywam.py` measures the paired-layer boundary at the real
 RoboMME token geometry (7x14 video grid, 8 gist, 16 action tokens) and writes a
-JSON report. Two-layer measurement, batch 1, 8 frames, activation checkpointing
-on, forward and one loss-scaled optimizer step:
+JSON report. Measurements are taken in isolated processes, per phase, because a
+single process reuses allocator state between configurations and a peak-minus-
+state residual absorbs the AdamW step transient.
 
-| Quantity | Measured (2 layers) | Projected (30 layers) |
+The two memory terms behave differently under sharding and must be projected
+separately:
+
+| Term | Full depth (30 layers, 5.92 B) | Shards under FSDP |
 | --- | --- | --- |
-| Parameters | 395 M | 5.92 B |
-| Peak allocated during a training step | 9.3 GB | 139.5 GB |
+| Optimizer state: FP32 params + grads + AdamW m and v (16 B/param) | 88.2 GB | yes |
+| Activations retained for backward | 0.0100 GB per layer-frame, so 0.30 GB per latent frame | no |
 
-The projection is linear in depth and therefore approximate; it also assumes an
-8-frame episode, while RoboMME episodes run to 1,259 timesteps and the hybrid
-cache grows with retained frames. Even so, 139.5 GB against 47.5 GB of usable
-device memory shows that full-depth single-GPU training is not possible and
-that sharding across at least three devices is required, not optional. The
-plan's "test FSDP only when measured need justifies it" condition is met.
+Per-GPU requirement against 47.5 GB usable, batch 1 per GPU, at RoboMME episode
+lengths (a latent frame is 16 environment steps):
+
+| GPUs | 8 frames | 27 frames (median) | 60 frames (p90) | 88 frames (max) |
+| --- | --- | --- | --- | --- |
+| 1 | 90.6 | 96.3 | 106.1 | 114.5 |
+| 2 | 46.5 | 52.2 | 62.1 | 70.4 |
+| **4** | **24.4** | **30.1** | **40.0** | 48.4 |
+| 8 (paper) | 13.4 | 19.1 | 29.0 | 37.4 |
+
+**Four GPUs is the approved local scale.** It clears the median episode with
+17 GB to spare and the p90 episode with 7 GB. Only the longest episodes exceed
+the ceiling, so the training window is capped at 64 latent frames (1,024
+environment steps), which covers more than 90% of episodes. The paper trains on
+eight GPUs; four is a documented reduction, not parity.
 
 Losses, gradient norms, and every gradient were finite, and the dynamic loss
 scale held at 65536 through the step.
@@ -150,9 +163,12 @@ scale held at 65536 through the step.
 
 Do not choose these silently during implementation:
 
-- The FP16 fit gate measures a two-layer core, not the pretrained 30-layer
-  model. Real depth, longer episodes, optimizer-state sharding, and FSDP
-  communication cost still need direct measurement before a training run.
+- The FP16 fit gate measures a two-to-six-layer core and projects linearly to
+  30. Real depth, FSDP communication and prefetch overhead, and the memory cost
+  of the VAE and T5 encoders are not yet in the budget.
+- FSDP mixed precision must not cast the complex 3-D RoPE buffers. The core
+  guards `Module._apply`, but FSDP's own buffer handling needs a direct check
+  on the first real distributed run.
 - Full-prefix VAE is selected as the oracle, not as the required fast path.
   Incremental VAE feature-cache semantics and the batching of the four raw
   sub-step mosaics remain an empirical equivalence question.

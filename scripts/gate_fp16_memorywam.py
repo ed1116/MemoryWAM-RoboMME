@@ -185,6 +185,7 @@ def main() -> None:
         sequence = episode_inputs(args.frames, device)
         outputs = core.forward_episode(**sequence)
         report["sequence_finite"] = finite([t for branch in outputs for t in branch])
+    core.reset()
     report["inference_peak_allocated_bytes"] = torch.cuda.max_memory_allocated(device)
     report["inference_peak_reserved_bytes"] = torch.cuda.max_memory_reserved(device)
 
@@ -197,8 +198,12 @@ def main() -> None:
         core.parameters(), lr=2e-4, weight_decay=0.01, betas=(0.9, 0.95)
     )
     train_inputs = episode_inputs(args.frames, device)
+    before_forward = torch.cuda.memory_allocated(device)
     with torch.autocast("cuda", dtype=torch.float16):
         _, _, noisy, action = core.forward_episode(**train_inputs)
+    # Graph retained for backward. Measured directly rather than derived from
+    # peak minus optimizer state, which would absorb the AdamW step transient.
+    report["activation_bytes"] = torch.cuda.memory_allocated(device) - before_forward
     loss = torch.stack(
         [t.float().pow(2).mean() for t in noisy]
         + [t.float().pow(2).mean() for t in action]
@@ -225,12 +230,29 @@ def main() -> None:
     ]
     report["train_peak_allocated_bytes"] = torch.cuda.max_memory_allocated(device)
     report["train_peak_reserved_bytes"] = torch.cuda.max_memory_reserved(device)
-    projected = int(report["train_peak_allocated_bytes"] / args.layers * FULL_DEPTH)
+    # Project the two terms separately: optimizer state shards under FSDP,
+    # activations do not. A single linear projection of peak memory conflates
+    # them and badly overestimates the sharded per-GPU cost.
     total_memory = torch.cuda.get_device_properties(device).total_memory
-    report["train_peak_allocated_projected_full_depth_bytes"] = projected
+    full_parameters = report["parameters_projected_full_depth"]
+    state_bytes = full_parameters * 16  # FP32 params + grads + AdamW m and v
+    act_per_layer_frame = (
+        report["activation_bytes"] / args.layers / args.frames
+    )
     report["device_total_memory_bytes"] = total_memory
-    report["projected_full_depth_fits_one_gpu"] = projected <= total_memory
-    report["projected_gpus_needed_if_sharded"] = -(-projected // total_memory)
+    report["optimizer_state_projected_bytes"] = state_bytes
+    report["activation_bytes_per_layer_frame"] = act_per_layer_frame
+    report["activation_projected_bytes_per_frame"] = act_per_layer_frame * FULL_DEPTH
+    report["per_gpu_budget"] = {
+        str(gpus): {
+            str(frames): int(state_bytes / gpus + act_per_layer_frame * FULL_DEPTH * frames)
+            for frames in (8, 27, 60, 88)  # min, median, p90, max RoboMME episode
+        }
+        for gpus in (1, 2, 4, 8)
+    }
+    report["fits_on_four_gpus_at_median_episode"] = (
+        state_bytes / 4 + act_per_layer_frame * FULL_DEPTH * 27
+    ) <= total_memory
     report["passed"] = all(
         (
             report["single_frame_finite"],

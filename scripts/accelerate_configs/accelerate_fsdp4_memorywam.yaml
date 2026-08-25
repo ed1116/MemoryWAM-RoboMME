@@ -1,0 +1,41 @@
+# MemoryWAM RoboMME: 4-GPU FSDP, the paper's sharding strategy at a quarter of
+# its 8-GPU scale. Measured budget per RTX 8000 (47.5 GB usable), 30 layers,
+# 5.92 B parameters, batch 1 per GPU:
+#
+#   optimizer state (FP32 params + grads + AdamW m,v) 88.2 GB / 4 = 22.1 GB  (sharded)
+#   activations                                        0.32 GB per latent frame  (not sharded)
+#
+# so ~31 GB at the median episode (27 latent frames) and ~47 GB at the longest.
+# Cap the training window at 64 latent frames to stay clear of the ceiling; see
+# docs/upstream_architecture.md.
+compute_environment: LOCAL_MACHINE
+debug: false
+distributed_type: FSDP
+
+fsdp_config:
+  # The paired video/action layer is the intended shard and checkpoint boundary.
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_transformer_layer_cls_to_wrap: MemoryWAMPairedLayer
+  # FULL_SHARD is ZeRO-3: parameters, gradients, and optimizer state all shard.
+  fsdp_sharding_strategy: FULL_SHARD
+  fsdp_backward_prefetch: BACKWARD_PRE
+  fsdp_state_dict_type: FULL_STATE_DICT
+  fsdp_offload_params: false
+  # Required so parameter groups and the RoPE buffer guard survive wrapping.
+  fsdp_use_orig_params: true
+  fsdp_sync_module_states: true
+  fsdp_cpu_ram_efficient_loading: true
+  fsdp_activation_checkpointing: false  # the core checkpoints its own layers
+
+# FP16 autocast over FP32 master weights. Pure FP16 parameters are not usable:
+# GradScaler refuses to unscale FP16 gradients. BF16 is emulated on sm_75 and
+# measured 13x slower than FP16, so it is not an option here.
+mixed_precision: fp16
+
+machine_rank: 0
+main_training_function: main
+num_machines: 1
+num_processes: 4
+rdzv_backend: static
+same_network: true
+use_cpu: false

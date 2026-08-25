@@ -31,6 +31,8 @@ FastWAM supplies the released Wan2.2 world-action implementation.
 | Shifted-logit-normal base draw (`mu=0`, `sigma=1`) before branch shift | Implementation inference constrained by paper | Seeded scheduler reference test; training selection not wired yet |
 | Two-camera 224x448 mosaic and 8-D action horizon 16 | RoboMME adaptation | Project plan |
 | FP16 with dynamic loss scaling | Hardware adaptation, measured | Project plan; paper used BF16. RTX 8000 BF16 is emulated and 4.8x slower than FP16; FlashAttention refuses sm_75 |
+| 4-GPU FSDP FULL_SHARD instead of the paper's 8 GPUs | Hardware adaptation, measured | 88.2 GB of optimizer state shards to 22.1 GB per GPU; activations add 0.30 GB per latent frame and do not shard |
+| Training window capped at 64 latent frames | Hardware adaptation | The longest RoboMME episodes (88 latent frames) would need 48.4 GB against 47.5 GB usable |
 | Autocast over FP32 master weights rather than FP16 parameters | Implementation requirement | `GradScaler` raises on FP16 gradients, so half-precision parameters are not a valid configuration |
 | Complex RoPE buffers preserved across dtype casts | Defect fix | `.to(float16)` silently dropped the imaginary part; guarded and regression-tested |
 
